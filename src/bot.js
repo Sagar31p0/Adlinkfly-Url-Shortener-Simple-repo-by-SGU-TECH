@@ -1,159 +1,105 @@
-const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const fs = require('fs');
-const express = require('express');
-const app = express();
+import logging
+import re
+import requests
+import asyncio
+import nest_asyncio
+from telegram import Update, InputMediaPhoto, InputMediaVideo
+from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
-app.get('/', (req, res) => {
-  res.send('Hello World!');
-});
+# Apply fix for nested event loops in Termux
+nest_asyncio.apply()
 
-const port = 8080;
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-});
+# Telegram Bot Token
+BOT_TOKEN = "8039349261:AAEfUwmKmByMUGzkuKBRvlOdiIJmwRrtBmQ"
 
-// Retrieve the Telegram bot token from the environment variable
-const botToken = process.env.TELEGRAM_BOT_TOKEN;
+# Terabox Link Generator API
+TERABOX_API = "https://teradisk.xyz/admin/gen.php?gen_url=true&terabox_url="
 
-// Create the Telegram bot instance
-const bot = new TelegramBot(botToken, { polling: true });
+# Logging Setup
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-// Handle /start command
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  const username = msg.from.username;
-  const welcomeMessage = `😇 Hello, ${username}!\n\n`
-    + 'Welcome to the Indishort URL Shortener Bot!\n'
-    + 'You can use this bot to shorten URLs using the Indishort.live api service.\n\n'
-    + 'To shorten a URL, just type or paste the URL directly in the chat, and the bot will provide you with the shortened URL.\n\n'
-    + 'If you haven\'t set your Indishort API token yet, use the command:\n/setapi YOUR_Indishort_API_TOKEN\n\n'
-    + 'How To Use Me 👇👇 \n\n'
-  + '✅1. Got To https://indishort.live & Complete Your Registration.\n\n'
-  + '✅2. Then Copy Your API Key from here https://indishort.live/member/tools/api Copy Your API Only. \n\n'
-  + '✅3. Then add your API using command /setapi \n\n' 
-  + 'Example: /setapi c49399f821fc020161bc2a31475ec59f35ae5b4\n\n'
-  + '⚠️ You must have to send link with https:// or http://\n\n'
-  + 'Made with ❤️ By: @jit362';
-  + '**Now, go ahead and try it out!**';
+# Terabox Regex Pattern
+TERABOX_REGEX = r"https?:\/\/(?:www\.)?(?:terabox|1024terabox)\.com\/s\/\S+"
 
-  bot.sendMessage(chatId, welcomeMessage);
-});
+# Fancy Fonts
+BOLD = lambda text: f"*{text}*"
+ITALIC = lambda text: f"_{text}_"
+MONOSPACE = lambda text: f"`{text}`"
 
-// Command: /setapi
-bot.onText(/\/setapi (.+)/, (msg, match) => {
-  const chatId = msg.chat.id;
-  const userToken = match[1].trim();
+async def start(update: Update, context: CallbackContext) -> None:
+    """Handles /start command"""
+    text = f"""
+{BOLD("Welcome to the Terabox Link Converter! 🚀")}
+{ITALIC("Send me a video URL, and I'll generate a stream link for you.")}
+    
+🔹 {BOLD("Supported Links:")}
+  - Terabox
+  - 1024terabox
 
-  // Save the user's AdlinkFly API token to the database
-  saveUserToken(chatId, userToken);
+📥 {BOLD("Just send me a link, and I'll do the rest!")}
+"""
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-  const response = `Your Indishort API token set successfully. ✅️✅️ Your token is: ${userToken}`;
-  bot.sendMessage(chatId, response);
-});
+async def handle_message(update: Update, context: CallbackContext) -> None:
+    """Processes incoming messages (text, images, videos)"""
+    message = update.message
+    chat_id = message.chat_id
+    text = message.text or message.caption or ""
 
-// Listen for any message (not just commands)
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
+    # Handle Images & Videos
+    if message.photo:
+        await message.reply_text("🖼️ You sent an image! Currently, I only process video links.")
+        return
+    elif message.video:
+        await message.reply_text("🎥 You sent a video! Currently, I only process video links.")
+        return
 
-  // Check if message contains text or forwarded content
-  if (msg.text || msg.caption) {
-    const text = msg.text || msg.caption;
-    const links = extractLinks(text);
+    # Find Terabox links
+    links = re.findall(TERABOX_REGEX, text, re.IGNORECASE)
+    
+    if not links:
+        await message.reply_text("❌ No valid Terabox links found. Please send a correct link.")
+        return
 
-    if (links.length > 0) {
-      const shortenedLinks = await shortenMultipleLinks(chatId, links);
+    # Send a waiting message
+    waiting_message = await message.reply_text("🔄 *Generating stream links...*\nPlease wait a moment ⏳", parse_mode=ParseMode.MARKDOWN)
 
-      // Replace original links in the text
-      const updatedText = replaceLinksInText(text, links, shortenedLinks);
+    # Convert Links
+    converted_links = {}
+    for link in links:
+        try:
+            response = requests.get(f"{TERABOX_API}{link}", timeout=10)
+            if response.status_code == 200 and response.text.strip():
+                converted_links[link] = response.text.strip()
+        except Exception as e:
+            logger.error(f"Error converting link {link}: {e}")
 
-      bot.sendMessage(chatId, updatedText, {
-        reply_to_message_id: msg.message_id,
-      });
-    }
-  }
+    if not converted_links:
+        await waiting_message.edit_text("❌ *Failed to convert links.*\nPlease try again later.", parse_mode=ParseMode.MARKDOWN)
+        return
 
-  // If message has media with caption, handle it
-  if (msg.photo || msg.video || msg.document) {
-    const caption = msg.caption || '';
-    const links = extractLinks(caption);
+    # Replace original links with converted ones
+    final_text = text
+    for original, converted in converted_links.items():
+        final_text = final_text.replace(original, f"🔗 {MONOSPACE(converted)}")
 
-    if (links.length > 0) {
-      const shortenedLinks = await shortenMultipleLinks(chatId, links);
+    # Edit the waiting message with the final result
+    await waiting_message.edit_text(f"✅ *Here are your converted links:*\n{final_text}", parse_mode=ParseMode.MARKDOWN)
 
-      // Replace original links in the caption
-      const updatedCaption = replaceLinksInText(caption, links, shortenedLinks);
+async def main():
+    """Main function to start the bot"""
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, handle_message))
+    
+    # Start the bot
+    logger.info("Bot is running... 🚀")
+    await app.run_polling()
 
-      bot.sendMessage(chatId, updatedCaption, {
-        reply_to_message_id: msg.message_id,
-      });
-    }
-  }
-});
-
-// Function to extract URLs from a given text
-function extractLinks(text) {
-  const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,})([^\s]*)/g;
-  const links = [...text.matchAll(urlRegex)].map(match => match[0]);
-  return links;
-}
-
-// Function to replace original links with shortened links in the text
-function replaceLinksInText(text, originalLinks, shortenedLinks) {
-  let updatedText = text;
-  originalLinks.forEach((link, index) => {
-    updatedText = updatedText.replace(link, shortenedLinks[index]);
-  });
-  return updatedText;
-}
-
-// Function to shorten multiple links
-async function shortenMultipleLinks(chatId, links) {
-  const shortenedLinks = [];
-  for (const link of links) {
-    const shortenedLink = await shortenUrl(chatId, link);
-    shortenedLinks.push(shortenedLink || link); // Use original link if shortening fails
-  }
-  return shortenedLinks;
-}
-
-// Function to shorten a single URL
-async function shortenUrl(chatId, url) {
-  const adlinkflyToken = getUserToken(chatId);
-
-  if (!adlinkflyToken) {
-    bot.sendMessage(chatId, 'Please set up 🎃 your INDISHORT API token first. 🔮 Use the command: /setapi YOUR_INDISHORT_API_TOKEN');
-    return null;
-  }
-
-  try {
-    const apiUrl = `https://indishort.live/api?api=${adlinkflyToken}&url=${encodeURIComponent(url)}`;
-    const response = await axios.get(apiUrl);
-    return response.data.shortenedUrl;
-  } catch (error) {
-    console.error('Shorten URL Error:', error);
-    return null;
-  }
-}
-
-// Function to save user's AdlinkFly API token
-function saveUserToken(chatId, token) {
-  const dbData = getDatabaseData();
-  dbData[chatId] = token;
-  fs.writeFileSync('./src/database.json', JSON.stringify(dbData, null, 2));
-}
-
-// Function to retrieve user's AdlinkFly API token
-function getUserToken(chatId) {
-  const dbData = getDatabaseData();
-  return dbData[chatId];
-}
-
-// Function to read the database file
-function getDatabaseData() {
-  try {
-    return JSON.parse(fs.readFileSync('./src/database.json', 'utf8'));
-  } catch (error) {
-    return {};
-  }
-}
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
